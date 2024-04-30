@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "api-token-scanner"
+description = "Api Token Scanner."
+authors = [{name = "Sergey M"}]
+readme = "README.md"
+# license = {file = "LICENSE"}
+
+classifiers = [
+  "Topic :: Internet"
+]
+
+requires-python = ">=3.12.3"
+
+dependencies = [
+  "aiohttp[speedups]",
+  "beautifulsoup4",
+  "lxml"
+]
+
+dynamic = ["version"]
+
+# pip install -e '.[dev]'
+# pip install -e '.[test]'
+[project.optional-dependencies]
+test = [
+  "pytest",
+]
+
+dev = [
+  "black",
+  "pylint",
+]
+
+[project.urls]
+Repository = "https://github.com/s3rgeym/api-token-scanner.git"
+
+[tool.setuptools.dynamic]
+version = {attr = "api_token_scanner.__version__"}
+
+[project.scripts]
+api-token-scanner = 'api_token_scanner:main'
