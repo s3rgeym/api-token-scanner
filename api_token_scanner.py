@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from email.message import Message
 from typing import AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
 
-import aiohttp
+import httpx
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,8 @@ class ApiTokenScanner:
     parallel: int = 10
     timeout: float = 15.0
 
-    def create_session(self) -> aiohttp.ClientSession:
-        con = aiohttp.TCPConnector(ssl=False)
-        tmt = aiohttp.ClientTimeout(self.timeout)
-        session = aiohttp.ClientSession(connector=con, timeout=tmt)
+    def create_session(self) -> httpx.AsyncClient:
+        session = httpx.AsyncClient(timeout=self.timeout, verify=False)
         session.headers.update(
             {
                 "User-Agent": USER_AGENT,
@@ -68,7 +66,7 @@ class ApiTokenScanner:
         )
         return session
 
-    async def get_session(self) -> aiohttp.ClientSession:
+    async def get_session(self) -> httpx.AsyncClient:
         while True:
             try:
                 return self.sessions.popleft()
@@ -76,14 +74,14 @@ class ApiTokenScanner:
                 await asyncio.sleep(0.1)
 
     @asynccontextmanager
-    async def acquire_session(self) -> AsyncIterator[aiohttp.ClientSession]:
+    async def acquire_session(self) -> AsyncIterator[httpx.AsyncClient]:
         session = await self.get_session()
         try:
             yield session
         finally:
             self.release_session(session)
 
-    def release_session(self, session: aiohttp.ClientSession) -> None:
+    def release_session(self, session: httpx.AsyncClient) -> None:
         self.sessions.appendleft(session)
 
     async def run(self, urls: Sequence[str]) -> None:
@@ -141,7 +139,7 @@ class ApiTokenScanner:
 
     async def fetch(
         self,
-        session: aiohttp.ClientSession,
+        session: httpx.AsyncClient,
         url: str,
         depth: int,
         q: asyncio.Queue[tuple[str, int] | None],
@@ -153,8 +151,8 @@ class ApiTokenScanner:
             response = await session.get(url)
             seen.add(str(response.url))
             response.raise_for_status()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            logger.error("unexpected client error or timeout")
+        except httpx.HTTPError:
+            logger.error("http error")
             return
         finally:
             seen.add(url)
@@ -174,7 +172,7 @@ class ApiTokenScanner:
         #     logger.debug("unexpected content-type: %s", ct)
         #     return
 
-        content = await response.text()
+        content = response.text
 
         if ct == "text/html" and depth > 0:
             links = self.extract_links(content)
