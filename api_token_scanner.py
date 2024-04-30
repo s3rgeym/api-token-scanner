@@ -9,7 +9,7 @@ import sys
 import urllib.parse as uparse
 from collections import deque
 from contextlib import asynccontextmanager, suppress
-from email.message import Message
+from email.message import Message as EmailMessage
 from typing import AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
 
 import httpx
@@ -239,7 +239,7 @@ class ApiTokenScanner:
 
 
 def parse_content_type(ct: str) -> tuple[str, dict[str, str]]:
-    message = Message()
+    message = EmailMessage()
     message["Content-Type"] = ct
     params = message.get_params()
     return params[0][0], dict(params[1:])
