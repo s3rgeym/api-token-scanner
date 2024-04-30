@@ -104,7 +104,7 @@ class ApiTokenScanner:
 
         await asyncio.wait(tasks)
 
-        await self.close_sessions()
+        # await self.close_sessions()
 
         logger.info("all tasks finished!")
 
@@ -150,7 +150,7 @@ class ApiTokenScanner:
         try:
             response = await session.get(url)
             seen.add(str(response.url))
-            response.raise_for_status()
+            # response.raise_for_status()
         except httpx.HTTPError as ex:
             logger.error(ex)
             return
