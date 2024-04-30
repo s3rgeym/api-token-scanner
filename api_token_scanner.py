@@ -15,6 +15,32 @@ from typing import AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
 import httpx
 from bs4 import BeautifulSoup
 
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+HTTP_REFERER = "https://www.google.com"
+
+
+# access_token,refresh_token
+TOKEN_NAME = (
+    r"[\w-]*(?:"
+    + "|".join(
+        re.escape(x).replace("_", "_?") for x in ["token", "api_key", "client_secret"]
+    )
+    + ")"
+)
+
+TOKEN_VALUE = r"[\w-]{30,}"
+
+TOKEN_RE = re.compile(
+    "|".join(
+        [
+            rf"(?P<query_param>[^\"']+{TOKEN_NAME}={TOKEN_VALUE}[^\"']*)",
+            rf"(?P<variable>{TOKEN_NAME}\s*=\s*[\"']{TOKEN_VALUE}[\"'])",
+            rf"(?P<property>{TOKEN_NAME}['\"]?\s*:\s*['\"]{TOKEN_VALUE}[\"'])",
+        ]
+    ),
+    re.IGNORECASE,
+)
+
 
 class ANSI:
     CSI = "\x1b["
@@ -47,32 +73,6 @@ class ColorHandler(logging.StreamHandler):
 
 
 logger = logging.getLogger(__name__)
-
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-HTTP_REFERER = "https://www.google.com"
-
-
-# access_token,refresh_token
-TOKEN_NAME = (
-    r"[\w-]*(?:"
-    + "|".join(
-        re.escape(x).replace("_", "_?") for x in ["token", "api_key", "client_secret"]
-    )
-    + ")"
-)
-
-TOKEN_VALUE = r"[\w-]{30,}"
-
-TOKEN_RE = re.compile(
-    "|".join(
-        [
-            rf"(?P<query_param>[^\"']+{TOKEN_NAME}={TOKEN_VALUE}[^\"']*)",
-            rf"(?P<variable>{TOKEN_NAME}\s*=\s*[\"']{TOKEN_VALUE}[\"'])",
-            rf"(?P<property>{TOKEN_NAME}['\"]?\s*:\s*['\"]{TOKEN_VALUE}[\"'])",
-        ]
-    ),
-    re.IGNORECASE,
-)
 
 
 class FoundToken(NamedTuple):
