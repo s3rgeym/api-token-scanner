@@ -146,7 +146,7 @@ class ApiTokenScanner:
             seen.add(str(response.url))
             response.raise_for_status()
         except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
-            logger.error(ex)
+            logger.exception(ex)
             return
         finally:
             seen.add(url)
@@ -216,6 +216,8 @@ class ApiTokenScanner:
 
             if sp.netloc != uparse.urlsplit(url).netloc:
                 continue
+
+            url, _ = uparse.urldefrag(url)
 
             if url in seen:
                 continue
