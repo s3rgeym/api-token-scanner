@@ -88,33 +88,33 @@ class ApiTokenScanner:
     parallel: int = 10
     timeout: float = 15.0
 
-    def create_session(self) -> httpx.AsyncClient:
-        session = httpx.AsyncClient(timeout=self.timeout, verify=False)
-        session.headers.update(
+    def create_client(self) -> httpx.AsyncClient:
+        client = httpx.AsyncClient(timeout=self.timeout, verify=False)
+        client.headers.update(
             {
                 "User-Agent": USER_AGENT,
                 "Referer": HTTP_REFERER,
             }
         )
-        return session
+        return client
 
-    async def get_session(self) -> httpx.AsyncClient:
+    async def get_client(self) -> httpx.AsyncClient:
         while True:
             try:
-                return self.sessions.popleft()
+                return self.clients.popleft()
             except IndexError:
                 await asyncio.sleep(0.1)
 
     @asynccontextmanager
-    async def acquire_session(self) -> AsyncIterator[httpx.AsyncClient]:
-        session = await self.get_session()
+    async def acquire_client(self) -> AsyncIterator[httpx.AsyncClient]:
+        client = await self.get_client()
         try:
-            yield session
+            yield client
         finally:
-            self.release_session(session)
+            self.release_client(client)
 
-    def release_session(self, session: httpx.AsyncClient) -> None:
-        self.sessions.appendleft(session)
+    def release_client(self, client: httpx.AsyncClient) -> None:
+        self.clients.appendleft(client)
 
     async def run(self, urls: Sequence[str]) -> None:
         q = asyncio.Queue()
@@ -122,7 +122,7 @@ class ApiTokenScanner:
         for x in urls:
             q.put_nowait((x, self.depth))
 
-        self.create_sessions()
+        self.create_clients()
         seen = set()
 
         tasks = [
@@ -135,8 +135,6 @@ class ApiTokenScanner:
             q.put_nowait(None)
 
         await asyncio.wait(tasks)
-
-        # await self.close_sessions()
 
         logger.info("all tasks finished!")
 
@@ -160,8 +158,8 @@ class ApiTokenScanner:
                     logger.debug(f"already seen: {url}")
                     continue
 
-                async with self.acquire_session() as session:
-                    await self.fetch(session, url, depth, q, seen)
+                async with self.acquire_client() as client:
+                    await self.fetch(client, url, depth, q, seen)
             # fix ERROR:asyncio:Task exception was never retrieved
             except (asyncio.CancelledError, KeyboardInterrupt):
                 break
@@ -170,7 +168,7 @@ class ApiTokenScanner:
 
     async def fetch(
         self,
-        session: httpx.AsyncClient,
+        client: httpx.AsyncClient,
         url: str,
         depth: int,
         q: asyncio.Queue[tuple[str, int] | None],
@@ -179,7 +177,7 @@ class ApiTokenScanner:
         logger.debug(f"fetch: {url=}, {depth=}")
 
         try:
-            response = await session.get(url)
+            response = await client.get(url)
             seen.add(str(response.url))
             # response.raise_for_status()
         except httpx.HTTPError as ex:
@@ -211,7 +209,7 @@ class ApiTokenScanner:
 
         for res in self.find_tokens(content):
             json.dump(
-                {**res._asdict(), "url": url},
+                res._asdict() | {"url": url},
                 self.output,
                 ensure_ascii=False,
             )
@@ -262,9 +260,9 @@ class ApiTokenScanner:
             logger.debug(f"add to queue: {url}")
             await q.put((url, depth))
 
-    def create_sessions(self) -> None:
-        self.sessions = deque(
-            iterable=(self.create_session() for x in range(self.parallel)),
+    def create_clients(self) -> None:
+        self.clients = deque(
+            iterable=(self.create_client() for x in range(self.parallel)),
             maxlen=self.parallel,
         )
 
