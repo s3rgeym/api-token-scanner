@@ -35,8 +35,8 @@ TOKEN_RE = re.compile(
     "|".join(
         [
             rf"(?P<query_param>[^\"']+{TOKEN_NAME}={TOKEN_VALUE}[^\"']*)",
-            rf"(?P<var>{TOKEN_NAME}\s*=\s*[\"']{TOKEN_VALUE}[\"'])",
-            rf"(?P<prop>{TOKEN_NAME}['\"]?\s*:\s*['\"]{TOKEN_VALUE}[\"'])",
+            rf"(?P<variable>{TOKEN_NAME}\s*=\s*[\"']{TOKEN_VALUE}[\"'])",
+            rf"(?P<property>{TOKEN_NAME}['\"]?\s*:\s*['\"]{TOKEN_VALUE}[\"'])",
         ]
     ),
     re.IGNORECASE,
