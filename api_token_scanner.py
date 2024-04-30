@@ -76,7 +76,7 @@ class ApiTokenScanner:
     def release_session(self, session: aiohttp.ClientSession) -> None:
         self.sessions.appendleft(session)
 
-    async def run(self, urls: list[str]) -> None:
+    async def run(self, urls: Sequence[str]) -> None:
         q = asyncio.Queue()
 
         for x in urls:
@@ -233,7 +233,7 @@ def parse_content_type(ct: str) -> tuple[str, dict[str, str]]:
 def main(argv: Sequence[str] | None = None) -> None:
     parser, args = _parse_args(argv)
 
-    urls = list(filter(None, map(str.strip, args.input)))
+    urls = set(filter(None, map(str.strip, args.input)))
 
     if not urls:
         parser.error("nothing to scan")
