@@ -96,7 +96,7 @@ class ApiTokenScanner:
         seen = set()
 
         tasks = [
-            asyncio.create_task(self.process(q, seen)) for _ in range(self.parallel)
+            asyncio.create_task(self.worker(q, seen)) for _ in range(self.parallel)
         ]
 
         await q.join()
@@ -115,7 +115,7 @@ class ApiTokenScanner:
             *(s.close() for s in self.sessions), return_exceptions=True
         )
 
-    async def process(
+    async def worker(
         self, q: asyncio.Queue[tuple[str, int] | None], seen: set[str]
     ) -> None:
         while True:
@@ -128,11 +128,14 @@ class ApiTokenScanner:
                 url, depth = item
 
                 if url in seen:
-                    logger.debug("already seen: %s", url)
+                    logger.debug(f"already seen: {url}")
                     continue
 
                 async with self.acquire_session() as session:
                     await self.fetch(session, url, depth, q, seen)
+            # fix ERROR:asyncio:Task exception was never retrieved
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                break
             finally:
                 q.task_done()
 
@@ -150,8 +153,8 @@ class ApiTokenScanner:
             response = await session.get(url)
             seen.add(str(response.url))
             response.raise_for_status()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
-            logger.exception(ex)
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            logger.error("unexpected client error or timeout")
             return
         finally:
             seen.add(url)
@@ -175,7 +178,7 @@ class ApiTokenScanner:
 
         if ct == "text/html" and depth > 0:
             links = self.extract_links(content)
-            await self.process_links(links, url, depth - 1, q, seen)
+            await self.worker_links(links, url, depth - 1, q, seen)
 
         for res in self.find_tokens(content):
             json.dump(
@@ -206,7 +209,7 @@ class ApiTokenScanner:
 
         return links
 
-    async def process_links(
+    async def worker_links(
         self,
         links: set[str],
         base_url: str,
@@ -243,10 +246,14 @@ def parse_content_type(ct: str) -> tuple[str, dict[str, str]]:
     return params[0][0], dict(params[1:])
 
 
+def normalize_url(s: str) -> str:
+    return s if "://" in s else "https://" + s
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser, args = _parse_args(argv)
 
-    urls = set(filter(None, map(str.strip, args.input)))
+    urls = set(map(normalize_url, filter(None, map(str.strip, args.input))))
 
     if not urls:
         parser.error("nothing to scan")
