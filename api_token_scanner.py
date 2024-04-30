@@ -10,7 +10,7 @@ import urllib.parse as uparse
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from email.message import Message
-from typing import AsyncIterator, Iterator, Sequence, TextIO
+from typing import AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -22,7 +22,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # access_token,refresh_token
 TOKEN_NAME = (
-    r"[\w-]*("
+    r"[\w-]*(?:"
     + "|".join(
         re.escape(x).replace("_", "_?") for x in ["token", "api_key", "client_secret"]
     )
@@ -34,13 +34,18 @@ TOKEN_VALUE = r"[\w-]{30,}"
 TOKEN_RE = re.compile(
     "|".join(
         [
-            f"(?P<url_param>{TOKEN_NAME}={TOKEN_VALUE})",
-            rf"(?P<variable_assign>{TOKEN_NAME}\s*=\s*[\"']{TOKEN_VALUE})",
-            rf"(?P<object_property>{TOKEN_NAME}['\"]?\s*:\s*['\"]{TOKEN_VALUE})",
+            rf"(?P<query_param>[^\"']+{TOKEN_NAME}={TOKEN_VALUE}[^\"']*)",
+            rf"(?P<var>{TOKEN_NAME}\s*=\s*[\"']{TOKEN_VALUE}[\"'])",
+            rf"(?P<prop>{TOKEN_NAME}['\"]?\s*:\s*['\"]{TOKEN_VALUE}[\"'])",
         ]
     ),
     re.IGNORECASE,
 )
+
+
+class FoundToken(NamedTuple):
+    type: str
+    match: str
 
 
 @dataclasses.dataclass
@@ -167,20 +172,21 @@ class ApiTokenScanner:
             links = self.extract_links(content)
             await self.process_links(links, url, depth - 1, q, seen)
 
-        for k, v in self.find_tokens(content):
+        for res in self.find_tokens(content):
             json.dump(
-                {"name": k, "match": v, "url": url},
+                {**res._asdict(), "url": url},
                 self.output,
                 ensure_ascii=False,
             )
             self.output.write("\n")
             self.output.flush()
 
-    def find_tokens(self, content: str) -> Iterator[tuple[str, str]]:
+    def find_tokens(self, content: str) -> Iterator[FoundToken]:
         for m in TOKEN_RE.finditer(content):
-            for k, v in m.groupdict().items():
+            match_dict = m.groupdict()
+            for k, v in match_dict.items():
                 if v is not None:
-                    yield (k, v)
+                    yield FoundToken(k, v)
                     break
 
     def extract_links(self, content: str) -> set[str]:
