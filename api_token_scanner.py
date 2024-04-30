@@ -120,9 +120,7 @@ class ApiTokenScanner:
     ) -> None:
         while True:
             try:
-                item = await q.get()
-
-                if item is None:
+                if (item := await q.get()) is None:
                     break
 
                 url, depth = item
