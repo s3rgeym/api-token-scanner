@@ -108,10 +108,11 @@ class ApiTokenScanner:
 
         logger.info("all tasks finished!")
 
-    async def close_sessions(self) -> None:
-        await asyncio.gather(
-            *(s.close() for s in self.sessions), return_exceptions=True
-        )
+    # в aiohttp кидает ошибку, если не закрыть сессию
+    # async def close_sessions(self) -> None:
+    #     await asyncio.gather(
+    #         *(s.close() for s in self.sessions), return_exceptions=True
+    #     )
 
     async def worker(
         self, q: asyncio.Queue[tuple[str, int] | None], seen: set[str]
@@ -268,7 +269,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         timeout=args.timeout,
     )
 
-    with suppress(KeyboardInterrupt):
+    with suppress(KeyboardInterrupt, asyncio.CancelledError):
         asyncio.run(scanner.run(urls))
 
 
