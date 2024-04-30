@@ -60,7 +60,12 @@ class ApiTokenScanner:
         con = aiohttp.TCPConnector(ssl=False)
         tmt = aiohttp.ClientTimeout(self.timeout)
         session = aiohttp.ClientSession(connector=con, timeout=tmt)
-        session.headers.update({"User-Agent": USER_AGENT})
+        session.headers.update(
+            {
+                "User-Agent": USER_AGENT,
+                "Referer": "https://www.google.com",
+            }
+        )
         return session
 
     async def get_session(self) -> aiohttp.ClientSession:
