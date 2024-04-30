@@ -22,14 +22,14 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 # access_token,refresh_token
 TOKEN_NAME = (
-    r"\S*("
+    r"[\w-]*("
     + "|".join(
         re.escape(x).replace("_", "_?") for x in ["token", "api_key", "client_secret"]
     )
     + ")"
 )
 
-TOKEN_VALUE = r"\w{30,}"
+TOKEN_VALUE = r"[\w-]{30,}"
 
 TOKEN_RE = re.compile(
     "|".join(
@@ -96,30 +96,35 @@ class ApiTokenScanner:
 
         await asyncio.wait(tasks)
 
+        await self.close_sessions()
+
         logger.info("all tasks finished!")
+
+    async def close_sessions(self) -> None:
+        await asyncio.gather(
+            *(s.close() for s in self.sessions), return_exceptions=True
+        )
 
     async def process(
         self, q: asyncio.Queue[tuple[str, int] | None], seen: set[str]
     ) -> None:
         while True:
-            async with self.acquire_session() as session:
-                try:
-                    item = await q.get()
+            try:
+                item = await q.get()
 
-                    if item is None:
-                        # ERROR:asyncio:Unclosed client session
-                        await session.close()
-                        break
+                if item is None:
+                    break
 
-                    url, depth = item
+                url, depth = item
 
-                    if url in seen:
-                        logger.debug("already seen: %s", url)
-                        continue
+                if url in seen:
+                    logger.debug("already seen: %s", url)
+                    continue
 
+                async with self.acquire_session() as session:
                     await self.fetch(session, url, depth, q, seen)
-                finally:
-                    q.task_done()
+            finally:
+                q.task_done()
 
     async def fetch(
         self,
@@ -133,6 +138,7 @@ class ApiTokenScanner:
 
         try:
             response = await session.get(url)
+            seen.add(str(response.url))
             response.raise_for_status()
         except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
             logger.error(ex)
@@ -140,8 +146,10 @@ class ApiTokenScanner:
         finally:
             seen.add(url)
 
-        if ct := response.headers.get("Content-Type"):
-            ct, _ = parse_content_type(ct)
+        url = str(response.url)
+
+        ct = response.headers.get("Content-Type", "")
+        ct, _ = parse_content_type(ct)
 
         # As of May 2022, text/javascript is the preferred type once again (see RFC 9239)
         # https://stackoverflow.com/a/73542396/2240578
@@ -155,15 +163,13 @@ class ApiTokenScanner:
 
         content = await response.text()
 
-        cur_url = str(response.url)
-
         if ct == "text/html" and depth > 0:
             links = self.extract_links(content)
-            await self.process_links(links, cur_url, depth - 1, q, seen)
+            await self.process_links(links, url, depth - 1, q, seen)
 
         for k, v in self.find_tokens(content):
             json.dump(
-                {"kind": k, "match": v, "url": cur_url},
+                {"name": k, "match": v, "url": url},
                 self.output,
                 ensure_ascii=False,
             )
@@ -211,22 +217,20 @@ class ApiTokenScanner:
             await q.put((url, depth))
 
     def create_sessions(self) -> None:
-        logger.debug("create sessions")
-
         self.sessions = deque(
             iterable=(self.create_session() for x in range(self.parallel)),
             maxlen=self.parallel,
         )
 
 
-def parse_content_type(content_type: str) -> tuple[str, dict[str, str]]:
-    email = Message()
-    email["Content-Type"] = content_type
-    params = email.get_params()
+def parse_content_type(ct: str) -> tuple[str, dict[str, str]]:
+    message = Message()
+    message["Content-Type"] = ct
+    params = message.get_params()
     return params[0][0], dict(params[1:])
 
 
-def main(argv: Sequence[str] = None) -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser, args = _parse_args(argv)
 
     urls = list(filter(None, map(str.strip, args.input)))
@@ -259,7 +263,9 @@ class NameSpace(argparse.Namespace):
     verbose: int
 
 
-def _parse_args(argv: Sequence[str]) -> tuple[argparse.ArgumentParser, NameSpace]:
+def _parse_args(
+    argv: Sequence[str] | None,
+) -> tuple[argparse.ArgumentParser, NameSpace]:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
@@ -311,4 +317,4 @@ def _parse_args(argv: Sequence[str]) -> tuple[argparse.ArgumentParser, NameSpace
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
