@@ -151,8 +151,8 @@ class ApiTokenScanner:
             response = await session.get(url)
             seen.add(str(response.url))
             response.raise_for_status()
-        except httpx.HTTPError:
-            logger.error("http error")
+        except httpx.HTTPError as ex:
+            logger.error(ex)
             return
         finally:
             seen.add(url)
