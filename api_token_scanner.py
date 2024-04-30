@@ -15,6 +15,37 @@ from typing import AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
 import httpx
 from bs4 import BeautifulSoup
 
+
+class ANSI:
+    CSI = "\x1b["
+    RESET = f"{CSI}m"
+    CLEAR_LINE = f"{CSI}2K\r"
+    BLACK = f"{CSI}30m"
+    RED = f"{CSI}31m"
+    GREEN = f"{CSI}32m"
+    YELLOW = f"{CSI}33m"
+    BLUE = f"{CSI}34m"
+    MAGENTA = f"{CSI}35m"
+    CYAN = f"{CSI}36m"
+    WHITE = f"{CSI}37m"
+
+
+class ColorHandler(logging.StreamHandler):
+    LEVEL_COLORS = {
+        logging.DEBUG: ANSI.GREEN,
+        logging.INFO: ANSI.YELLOW,
+        logging.WARNING: ANSI.MAGENTA,
+        logging.ERROR: ANSI.RED,
+        logging.CRITICAL: ANSI.RED,
+    }
+
+    _fmt = logging.Formatter("[%(levelname).1s] %(message)s")
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = self._fmt.format(record)
+        return f"{self.LEVEL_COLORS[record.levelno]}{message}{ANSI.RESET}"
+
+
 logger = logging.getLogger(__name__)
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -145,7 +176,7 @@ class ApiTokenScanner:
         q: asyncio.Queue[tuple[str, int] | None],
         seen: set[str],
     ) -> None:
-        logger.debug("fetch url: %s", url)
+        logger.debug(f"fetch: {url=}, {depth=}")
 
         try:
             response = await session.get(url)
@@ -176,7 +207,7 @@ class ApiTokenScanner:
 
         if ct == "text/html" and depth > 0:
             links = self.extract_links(content)
-            await self.worker_links(links, url, depth - 1, q, seen)
+            await self.process_links(links, url, depth - 1, q, seen)
 
         for res in self.find_tokens(content):
             json.dump(
@@ -207,7 +238,7 @@ class ApiTokenScanner:
 
         return links
 
-    async def worker_links(
+    async def process_links(
         self,
         links: set[str],
         base_url: str,
@@ -228,6 +259,7 @@ class ApiTokenScanner:
             if url in seen:
                 continue
 
+            logger.debug(f"add to queue: {url}")
             await q.put((url, depth))
 
     def create_sessions(self) -> None:
@@ -256,10 +288,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not urls:
         parser.error("nothing to scan")
 
-    logging.basicConfig()
-
     lvl = max(logging.DEBUG, logging.WARNING - logging.DEBUG * args.verbose)
     logger.setLevel(level=lvl)
+    logger.addHandler(ColorHandler())
 
     scanner = ApiTokenScanner(
         depth=args.depth,
