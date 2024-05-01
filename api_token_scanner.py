@@ -87,7 +87,7 @@ class ApiTokenScanner:
     output: TextIO = sys.stdout
     parallel: int = 50
     timeout: float = 5.0
-    urls_per_host: int = 150
+    urls_per_host: int = 100
 
     def create_client(self) -> httpx.AsyncClient:
         timeout = httpx.Timeout(self.timeout)
