@@ -16,7 +16,7 @@ classifiers = [
 requires-python = ">=3.12.3"
 
 dependencies = [
-  "httpx",
+  "aiohttps[speedups]",
   "beautifulsoup4",
   "lxml"
 ]

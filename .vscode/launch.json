@@ -1,0 +1,22 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Api Token Scanner",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "api_token_scanner.py",
+      "console": "integratedTerminal",
+      "args": [
+        "-c",
+        "4",
+        "-i",
+        "../web-parsing/data/habr-sites.txt",
+        "-vv"
+      ]
+    }
+  ]
+}
