@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 import argparse
 import asyncio
+import collections
 import dataclasses
 import json
 import logging
 import re
 import sys
 import urllib.parse as uparse
-from collections import deque
 from contextlib import asynccontextmanager, suppress
 from email.message import Message as EmailMessage
 from typing import AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
@@ -85,11 +85,13 @@ class ApiTokenScanner:
     _: dataclasses.KW_ONLY
     depth: int = 1
     output: TextIO = sys.stdout
-    parallel: int = 10
-    timeout: float = 15.0
+    parallel: int = 50
+    timeout: float = 5.0
+    urls_per_host: int = 150
 
     def create_client(self) -> httpx.AsyncClient:
-        client = httpx.AsyncClient(timeout=self.timeout, verify=False)
+        timeout = httpx.Timeout(self.timeout)
+        client = httpx.AsyncClient(timeout=timeout, verify=False)
         client.headers.update(
             {
                 "User-Agent": USER_AGENT,
@@ -103,7 +105,9 @@ class ApiTokenScanner:
             try:
                 return self.clients.popleft()
             except IndexError:
-                await asyncio.sleep(0.1)
+                # эта ошибка вообще не должна возникнуть
+                logger.warning("wait for client")
+                await asyncio.sleep(0.2)
 
     @asynccontextmanager
     async def acquire_client(self) -> AsyncIterator[httpx.AsyncClient]:
@@ -117,22 +121,21 @@ class ApiTokenScanner:
         self.clients.appendleft(client)
 
     async def run(self, urls: Sequence[str]) -> None:
-        q = asyncio.Queue()
+        self.q = asyncio.Queue()
 
         for x in urls:
-            q.put_nowait((x, self.depth))
+            self.q.put_nowait((x, self.depth))
 
         self.create_clients()
-        seen = set()
+        self.seen = set()
+        self.counter = collections.Counter()
 
-        tasks = [
-            asyncio.create_task(self.worker(q, seen)) for _ in range(self.parallel)
-        ]
+        tasks = [asyncio.create_task(self.worker()) for _ in range(self.parallel)]
 
-        await q.join()
+        await self.q.join()
 
         for _ in range(self.parallel):
-            q.put_nowait(None)
+            self.q.put_nowait(None)
 
         await asyncio.wait(tasks)
 
@@ -144,68 +147,73 @@ class ApiTokenScanner:
     #         *(s.close() for s in self.sessions), return_exceptions=True
     #     )
 
-    async def worker(
-        self, q: asyncio.Queue[tuple[str, int] | None], seen: set[str]
-    ) -> None:
+    async def worker(self) -> None:
         while True:
             try:
-                if (item := await q.get()) is None:
+                if (item := await self.q.get()) is None:
                     break
 
                 url, depth = item
 
-                if url in seen:
+                if url in self.seen:
                     logger.debug(f"already seen: {url}")
                     continue
 
                 async with self.acquire_client() as client:
-                    await self.fetch(client, url, depth, q, seen)
+                    await self.fetch(client, url, depth)
             # fix ERROR:asyncio:Task exception was never retrieved
             except (asyncio.CancelledError, KeyboardInterrupt):
+                logger.warning("task canceled!")
                 break
+            except Exception as ex:
+                logger.error(f"unexpected error: {ex}")
             finally:
-                q.task_done()
+                self.q.task_done()
 
-    async def fetch(
-        self,
-        client: httpx.AsyncClient,
-        url: str,
-        depth: int,
-        q: asyncio.Queue[tuple[str, int] | None],
-        seen: set[str],
-    ) -> None:
-        logger.debug(f"fetch: {url=}, {depth=}")
+    async def fetch(self, client: httpx.AsyncClient, url: str, depth: int) -> None:
+        logger.debug(f"fetch: {url=}, {depth=}, {self.q.qsize()=}")
 
         try:
             response = await client.get(url)
-            seen.add(str(response.url))
+            self.seen.add(str(response.url))
             # response.raise_for_status()
-        except httpx.HTTPError as ex:
-            logger.error(ex)
+        except httpx.HTTPError:
+            logger.warning(f"connection error: {url}")
             return
         finally:
-            seen.add(url)
+            self.seen.add(url)
 
         url = str(response.url)
 
-        ct = response.headers.get("Content-Type", "")
-        ct, _ = parse_content_type(ct)
+        if (content_length := int(response.headers.get("Content-Length", 0))) == 0:
+            logger.warning(f"empty response body: {url}")
+
+        if content_length > 100_000:
+            logger.warning(f"content-length too long: {url}")
+            return
+
+        content_type = response.headers.get("Content-Type", "")
+        content_type, _ = parse_content_type(content_type)
 
         # As of May 2022, text/javascript is the preferred type once again (see RFC 9239)
         # https://stackoverflow.com/a/73542396/2240578
-        # if ct not in [
-        #     "text/html",
-        #     "application/javascript",
-        #     "text/javascript",
-        # ]:
-        #     logger.debug("unexpected content-type: %s", ct)
-        #     return
+        if content_type not in [
+            "text/html",
+            "application/javascript",
+            "text/javascript",
+        ]:
+            logger.warning("unexpected content-type: %s", content_type)
+            return
 
         content = response.text
 
-        if ct == "text/html" and depth > 0:
+        if (
+            content_type == "text/html"
+            and depth > 0
+            and self.urls_per_host > self.counter[uparse.urlsplit(url).netloc]
+        ):
             links = self.extract_links(content)
-            await self.process_links(links, url, depth - 1, q, seen)
+            await self.process_links(links, url, depth - 1)
 
         for res in self.find_tokens(content):
             json.dump(
@@ -241,8 +249,6 @@ class ApiTokenScanner:
         links: set[str],
         base_url: str,
         depth: int,
-        q: asyncio.Queue[tuple[str, int] | None],
-        seen: set[str],
     ) -> None:
         sp = uparse.urlsplit(base_url)
 
@@ -254,14 +260,19 @@ class ApiTokenScanner:
 
             url, _ = uparse.urldefrag(url)
 
-            if url in seen:
+            if url in self.seen:
                 continue
 
-            logger.debug(f"add to queue: {url}")
-            await q.put((url, depth))
+            if self.counter[sp.netloc] + 1 > self.urls_per_host:
+                logger.debug(f"limit exceeded urls per host: {sp.netloc}")
+                return
+
+            logger.debug(f"add to self.queue: {url}")
+            self.counter[sp.netloc] += 1
+            await self.q.put((url, depth))
 
     def create_clients(self) -> None:
-        self.clients = deque(
+        self.clients = collections.deque(
             iterable=(self.create_client() for x in range(self.parallel)),
             maxlen=self.parallel,
         )
@@ -295,6 +306,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         output=args.output,
         parallel=args.parallel,
         timeout=args.timeout,
+        urls_per_host=args.urls_per_host,
     )
 
     with suppress(KeyboardInterrupt, asyncio.CancelledError):
@@ -308,6 +320,7 @@ class NameSpace(argparse.Namespace):
     parallel: int
     timeout: float
     verbose: int
+    urls_per_host: int
 
 
 def _parse_args(
@@ -340,18 +353,24 @@ def _parse_args(
         default=1,
     )
     parser.add_argument(
+        "--urls-per-host",
+        help="urls per host",
+        type=int,
+        default=100,
+    )
+    parser.add_argument(
         "-p",
         "--parallel",
         help="number of parallel tasks",
         type=int,
-        default=10,
+        default=50,
     )
     parser.add_argument(
         "-t",
         "--timeout",
         help="client timeout",
         type=float,
-        default=15.0,
+        default=5.0,
     )
     parser.add_argument(
         "-v",
