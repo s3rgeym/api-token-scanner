@@ -14,7 +14,7 @@ import warnings
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from email.message import Message as EmailMessage
-from typing import AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
+from typing import Any, AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -90,26 +90,37 @@ class FoundToken(NamedTuple):
     match: str
 
 
+class Queue(asyncio.Queue):
+    def _put(self, item: Any) -> None:
+        """добавляет элементы наверх, а не в конец"""
+        self._queue.appendleft(item)
+
+
 @dataclasses.dataclass
 class ApiTokenScanner:
+    output: TextIO = sys.stdout
     _: dataclasses.KW_ONLY
     depth: int = 1
-    output: TextIO = sys.stdout
-    concurrency: int = 50
+    concurrency: int = 30
     timeout: float = 5.0
-    urls_per_host: int = 150
+    urls_per_host: int = 120
     executor: ProcessPoolExecutor = dataclasses.field(
         default_factory=ProcessPoolExecutor
     )
 
     @asynccontextmanager
     async def get_client_session(self) -> AsyncIterator[aiohttp.ClientSession]:
-        conn = aiohttp.TCPConnector(ssl=False)
+        conn = aiohttp.TCPConnector(
+            limit=0,
+            ssl=False,
+            ttl_dns_cache=900,
+            use_dns_cache=True,
+            keepalive_timeout=60,
+        )
         tmt = aiohttp.ClientTimeout(
-            # total=None,
-            # sock_connect=self.timeout,
-            # sock_read=self.timeout,
-            self.timeout,
+            total=None,
+            sock_connect=self.timeout,
+            sock_read=self.timeout,
         )
         async with aiohttp.ClientSession(connector=conn, timeout=tmt) as client:
             client.headers.update(
@@ -121,7 +132,7 @@ class ApiTokenScanner:
             yield client
 
     async def run(self, urls: Sequence[str]) -> None:
-        self.q = asyncio.Queue()
+        self.q = Queue()
 
         for x in urls:
             self.q.put_nowait((x, self.depth))
@@ -131,53 +142,54 @@ class ApiTokenScanner:
         self.seen = set()
         self.counter = collections.Counter()
 
-        tasks = [asyncio.create_task(self.worker()) for _ in range(self.concurrency)]
+        async with self.get_client_session() as self.session:
+            tasks = [
+                asyncio.create_task(self.worker()) for _ in range(self.concurrency)
+            ]
 
-        await self.q.join()
+            await self.q.join()
 
-        for _ in range(self.concurrency):
-            self.q.put_nowait(None)
+            for _ in range(self.concurrency):
+                self.q.put_nowait(None)
 
-        await asyncio.wait(tasks)
+            await asyncio.wait(tasks)
 
         logger.info("all tasks finished!")
 
     async def worker(self) -> None:
-        async with self.get_client_session() as session:
-            while True:
-                try:
-                    if (item := await self.q.get()) is None:
-                        break
-
-                    url, depth = item
-
-                    if url in self.seen:
-                        logger.debug(f"already seen: {url}")
-                        continue
-
-                    logger.debug(f"start handle: {url}")
-                    await self.handle_url(session, url, depth)
-                    logger.debug(f"finish handle: {url}")
-                # fix ERROR:asyncio:Task exception was never retrieved
-                except (asyncio.CancelledError, KeyboardInterrupt):
-                    logger.warning("task canceled!")
+        while True:
+            try:
+                if (item := await self.q.get()) is None:
                     break
-                except Exception as ex:
-                    logger.error(f"unexpected error: {ex}")
-                finally:
-                    self.q.task_done()
-                    logger.debug(f"queue size: {self.q.qsize()}")
+
+                url, depth = item
+
+                if url in self.seen:
+                    logger.debug(f"already seen: {url}")
+                    continue
+
+                logger.debug(f"start handle: {url}")
+                await self.handle_url(url, depth)
+                logger.debug(f"finish handle: {url}")
+            # fix ERROR:asyncio:Task exception was never retrieved
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                logger.warning("task canceled!")
+                break
+            except Exception as ex:
+                logger.error(f"unexpected error: {ex}")
+            finally:
+                self.q.task_done()
+                logger.debug(f"queue size: {self.q.qsize()}")
 
     async def handle_url(
         self,
-        session: aiohttp.ClientSession,
         url: str,
         depth: int,
     ) -> None:
         logger.debug(f"{url=}, {depth=}")
 
         try:
-            response = await session.get(url)
+            response = await self.session.get(url)
             self.seen.add(str(response.url))
             response.raise_for_status()
         except (aiohttp.ClientError, asyncio.TimeoutError):
@@ -363,14 +375,14 @@ def _parse_args(
         "--urls-per-host",
         help="urls per host",
         type=int,
-        default=50,
+        default=120,
     )
     parser.add_argument(
         "-c",
         "--concurrency",
         help="number of concurrent workers",
         type=int,
-        default=10,
+        default=30,
     )
     parser.add_argument(
         "-t",
