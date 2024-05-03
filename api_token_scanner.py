@@ -189,6 +189,7 @@ class ApiTokenScanner:
     async def worker(self) -> None:
         while True:
             try:
+                logger.debug(f"queue size: {self.q.qsize()}")
                 url, depth = await self.q.get()
 
                 if url in self.seen:
@@ -205,7 +206,6 @@ class ApiTokenScanner:
             finally:
                 with suppress(ValueError):
                     self.q.task_done()
-                logger.debug(f"queue size: {self.q.qsize()}")
 
     async def handle_url(
         self,
