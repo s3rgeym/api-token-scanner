@@ -161,6 +161,12 @@ class ApiTokenScanner:
             )
             yield client
 
+    async def shutdown(self) -> None:
+        await self.q.join()
+
+        for t in self.workers:
+            t.cancel()
+
     async def run(self, urls: Sequence[str]) -> None:
         self.q = Queue()
 
@@ -172,16 +178,11 @@ class ApiTokenScanner:
         self.seen = set()
         self.counter = collections.Counter()
 
-        async with self.get_client_session() as self.session:
-            workers = [self.worker() for _ in range(self.concurrency)]
-
-            async def wait_empty():
-                await self.q.join()
-
-                for w in workers:
-                    w.cancel()
-
-            await asyncio.gather(*workers, wait_empty(), return_exceptions=True)
+        async with self.get_client_session() as self.session, asyncio.TaskGroup() as tg:
+            self.workers = [
+                tg.create_task(self.worker()) for _ in range(self.concurrency)
+            ]
+            tg.create_task(self.shutdown())
 
         logger.info("all tasks finished!")
 
@@ -202,7 +203,8 @@ class ApiTokenScanner:
             except Exception as ex:
                 logger.error(f"unexpected error: {ex}")
             finally:
-                self.q.task_done()
+                with suppress(ValueError):
+                    self.q.task_done()
                 logger.debug(f"queue size: {self.q.qsize()}")
 
     async def handle_url(
@@ -344,7 +346,7 @@ def normalize_url(s: str) -> str:
 def main(argv: Sequence[str] | None = None) -> None:
     parser, args = _parse_args(argv)
 
-    urls = set(map(normalize_url, filter(None, map(str.strip, args.input))))
+    urls = list(map(normalize_url, filter(None, map(str.strip, args.input))))
 
     if not urls:
         parser.error("nothing to scan")
