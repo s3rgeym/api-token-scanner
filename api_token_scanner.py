@@ -10,19 +10,16 @@ import logging
 import re
 import sys
 import urllib.parse as uparse
-import warnings
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from email.message import Message as EmailMessage
 from typing import Any, AsyncIterator, Iterator, NamedTuple, Sequence, TextIO
 
 import aiohttp
-from bs4 import BeautifulSoup
 
-try:
-    import lxml  # noqa: F401
-except ImportError:
-    warnings.warn("lxml is not installed")
+# try:
+#     import lxml  # noqa: F401
+# except ImportError:
+#     warnings.warn("lxml is not installed")
 
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -31,7 +28,7 @@ HTTP_REFERER = "https://www.google.com"
 
 # access_token,refresh_token
 TOKEN_NAME = (
-    r"[\w-]*(?:"
+    r"[\w\.-]*(?:"
     + "|".join(
         re.escape(x).replace("_", "_?") for x in ["token", "api_key", "client_secret"]
     )
@@ -50,6 +47,42 @@ TOKEN_RE = re.compile(
     ),
     re.IGNORECASE,
 )
+
+EXCLUDE_EXTS = (
+    ".css",
+    ".scss",
+    ".less",
+    ".map",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".gif",
+    ".bmp",
+    ".mp3",
+    ".wav",
+    ".webm",
+    ".avi",
+    ".ogg",
+    ".mov",
+    ".qt",
+    ".avi",
+    ".mp4",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xlsx",
+    ".txt",
+    ".csv",
+    ".zip",
+    ".rar",
+    ".tar.gz",
+    ".exe",
+    ".dll",
+    ".bin",
+    ".apk",
+)
+
+LINK_RE = re.compile(r"<(?:a[^>]+href|script[^>]+src)=\"([^\"]+)", re.IGNORECASE)
 
 
 class ANSI:
@@ -101,19 +134,16 @@ class ApiTokenScanner:
     output: TextIO = sys.stdout
     _: dataclasses.KW_ONLY
     depth: int = 1
-    concurrency: int = 30
+    concurrency: int = 10
     timeout: float = 5.0
-    urls_per_host: int = 120
-    executor: ProcessPoolExecutor = dataclasses.field(
-        default_factory=ProcessPoolExecutor
-    )
+    urls_per_host: int = 100
 
     @asynccontextmanager
     async def get_client_session(self) -> AsyncIterator[aiohttp.ClientSession]:
         conn = aiohttp.TCPConnector(
             limit=0,
             ssl=False,
-            ttl_dns_cache=900,
+            ttl_dns_cache=300,
             use_dns_cache=True,
             keepalive_timeout=60,
         )
@@ -143,34 +173,28 @@ class ApiTokenScanner:
         self.counter = collections.Counter()
 
         async with self.get_client_session() as self.session:
-            tasks = [
-                asyncio.create_task(self.worker()) for _ in range(self.concurrency)
-            ]
+            workers = [self.worker() for _ in range(self.concurrency)]
 
-            await self.q.join()
+            async def wait_empty():
+                await self.q.join()
 
-            for _ in range(self.concurrency):
-                self.q.put_nowait(None)
+                for w in workers:
+                    w.cancel()
 
-            await asyncio.wait(tasks)
+            await asyncio.gather(*workers, wait_empty(), return_exceptions=True)
 
         logger.info("all tasks finished!")
 
     async def worker(self) -> None:
         while True:
             try:
-                if (item := await self.q.get()) is None:
-                    break
-
-                url, depth = item
+                url, depth = await self.q.get()
 
                 if url in self.seen:
                     logger.debug(f"already seen: {url}")
                     continue
 
-                logger.debug(f"start handle: {url}")
                 await self.handle_url(url, depth)
-                logger.debug(f"finish handle: {url}")
             # fix ERROR:asyncio:Task exception was never retrieved
             except (asyncio.CancelledError, KeyboardInterrupt):
                 logger.warning("task canceled!")
@@ -186,62 +210,63 @@ class ApiTokenScanner:
         url: str,
         depth: int,
     ) -> None:
-        logger.debug(f"{url=}, {depth=}")
-
+        logger.debug(f"start handle: {url} ({depth=})")
         try:
-            response = await self.session.get(url)
-            self.seen.add(str(response.url))
-            response.raise_for_status()
+            async with self.session.get(url) as response:
+                self.seen.add(url)
+                self.seen.add(str(response.url))
+                response.raise_for_status()
+
+                url = str(response.url)
+
+                if (
+                    content_length := int(response.headers.get("Content-Length", 0))
+                ) == 0:
+                    logger.warning(f"empty response body: {url}")
+                    return
+
+                if content_length > 100_000:
+                    logger.warning(f"content-length too long: {url}")
+                    return
+
+                content_type = response.headers.get("Content-Type", "")
+                content_type, _ = parse_content_type(content_type)
+
+                # As of May 2022, text/javascript is the preferred type once again (see RFC 9239)
+                # https://stackoverflow.com/a/73542396/2240578
+                if content_type not in [
+                    "text/html",
+                    "application/javascript",
+                    "text/javascript",
+                ]:
+                    logger.warning("unexpected content-type: %s", content_type)
+                    return
+
+                logger.debug(f"read contents: {url}")
+                content = await response.text()
+
+                if (
+                    content_type == "text/html"
+                    and depth > 0
+                    and self.urls_per_host > self.counter[uparse.urlsplit(url).netloc]
+                ):
+                    logger.debug(f"collect links: {url}")
+                    await self.collect_links(content, url, depth - 1)
+
+                logger.debug(f"find tokens: {url}")
+
+                for res in self.find_tokens(content):
+                    json.dump(
+                        res._asdict() | {"url": url},
+                        self.output,
+                        ensure_ascii=False,
+                    )
+                    self.output.write("\n")
+                    self.output.flush()
         except (aiohttp.ClientError, asyncio.TimeoutError):
             logger.warning(f"connection error: {url}")
-            return
-        finally:
-            self.seen.add(url)
-
-        url = str(response.url)
-
-        if (content_length := int(response.headers.get("Content-Length", 0))) == 0:
-            logger.warning(f"empty response body: {url}")
-            return
-
-        if content_length > 100_000:
-            logger.warning(f"content-length too long: {url}")
-            return
-
-        content_type = response.headers.get("Content-Type", "")
-        content_type, _ = parse_content_type(content_type)
-
-        # As of May 2022, text/javascript is the preferred type once again (see RFC 9239)
-        # https://stackoverflow.com/a/73542396/2240578
-        if content_type not in [
-            "text/html",
-            "application/javascript",
-            "text/javascript",
-        ]:
-            logger.warning("unexpected content-type: %s", content_type)
-            return
-
-        logger.debug(f"read contents: {url}")
-        content = await response.text()
-
-        if (
-            content_type == "text/html"
-            and depth > 0
-            and self.urls_per_host > self.counter[uparse.urlsplit(url).netloc]
-        ):
-            logger.debug(f"collect links: {url}")
-            await self.collect_links(content, url, depth - 1)
-
-        logger.debug(f"find tokens: {url}")
-
-        for res in self.find_tokens(content):
-            json.dump(
-                res._asdict() | {"url": url},
-                self.output,
-                ensure_ascii=False,
-            )
-            self.output.write("\n")
-            self.output.flush()
+        else:
+            logger.debug(f"successfully handle: {url}")
 
     def find_tokens(self, content: str) -> Iterator[FoundToken]:
         for m in TOKEN_RE.finditer(content):
@@ -251,18 +276,19 @@ class ApiTokenScanner:
                     yield FoundToken(k, v)
                     break
 
-    @staticmethod
-    def extract_links(content: str) -> set[str]:
-        soup = BeautifulSoup(content, features="lxml")
-        rv = set()
+    def extract_links(self, content: str) -> list[str]:
+        # тормозит
+        # soup = BeautifulSoup(content, features="lxml")
+        # rv = set()
 
-        for el in soup.find_all("a", href=True, download=False):
-            rv.add(el["href"])
+        # for el in soup.find_all("a", href=True, download=False):
+        #     rv.add(el["href"])
 
-        for el in soup.find_all("script", src=True):
-            rv.add(el["src"])
+        # for el in soup.find_all("script", src=True):
+        #     rv.add(el["src"])
 
-        return rv
+        # return rv
+        return LINK_RE.findall(content)
 
     async def collect_links(
         self,
@@ -270,11 +296,13 @@ class ApiTokenScanner:
         base_url: str,
         depth: int,
     ) -> None:
-        links = await asyncio.get_event_loop().run_in_executor(
-            self.executor,
-            self.extract_links,
-            content,
-        )
+        # links = await asyncio.get_event_loop().run_in_executor(
+        #     self.executor,
+        #     self.extract_links,
+        #     content,
+        # )
+
+        links = self.extract_links(content)
 
         sp = uparse.urlsplit(base_url)
 
@@ -287,6 +315,11 @@ class ApiTokenScanner:
             url, _ = uparse.urldefrag(url)
 
             if url in self.seen:
+                continue
+
+            url_without_query = url.split("?")[0]
+
+            if url_without_query.lower().endswith(EXCLUDE_EXTS):
                 continue
 
             if self.counter[sp.netloc] + 1 > self.urls_per_host:
@@ -375,7 +408,7 @@ def _parse_args(
         "--urls-per-host",
         help="urls per host",
         type=int,
-        default=120,
+        default=150,
     )
     parser.add_argument(
         "-c",
