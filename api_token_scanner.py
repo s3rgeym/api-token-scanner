@@ -108,7 +108,7 @@ class ColorHandler(logging.StreamHandler):
         logging.CRITICAL: ANSI.RED,
     }
 
-    _fmt = logging.Formatter("%(asctime)s - %(levelname)s: %(message)s")
+    _fmt = logging.Formatter("[%(asctime)s] %(levelname)8s: %(message)s")
 
     def format(self, record: logging.LogRecord) -> str:
         message = self._fmt.format(record)
