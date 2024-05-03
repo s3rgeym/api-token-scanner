@@ -173,8 +173,6 @@ class ApiTokenScanner:
         for x in urls[::-1]:
             self.q.put_nowait((x, self.depth))
 
-        logger.debug(f"queue size: {self.q.qsize()}")
-
         self.seen = set()
         self.counter = collections.Counter()
 
