@@ -140,15 +140,21 @@ class ApiTokenScanner:
 
     @asynccontextmanager
     async def get_client_session(self) -> AsyncIterator[aiohttp.ClientSession]:
+        resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
         conn = aiohttp.TCPConnector(
             limit=self.concurrency,
             ssl=False,
             ttl_dns_cache=300,
             use_dns_cache=True,
             keepalive_timeout=60,
+            resolver=resolver,
         )
         # tmt = aiohttp.ClientTimeout(self.timeout)
-        async with aiohttp.ClientSession(connector=conn) as client:
+        async with aiohttp.ClientSession(
+            connector=conn,
+            # тормозят куки?
+            cookie_jar=aiohttp.DummyCookieJar(),
+        ) as client:
             client.headers.update(
                 {
                     "User-Agent": USER_AGENT,
@@ -157,16 +163,10 @@ class ApiTokenScanner:
             )
             yield client
 
-    # async def shutdown(self) -> None:
-    #     await self.q.join()
-
-    #     for _ in range(self.concurrency):
-    #         self.q.put_nowait((None, 0))
-
     async def run(self, urls: Sequence[str]) -> None:
         self.q = Queue()
 
-        for x in urls[::-1]:
+        for x in reversed(urls):
             self.q.put_nowait((x, self.depth))
 
         self.seen = set()
@@ -176,12 +176,15 @@ class ApiTokenScanner:
             for _ in range(self.concurrency):
                 tg.create_task(self.worker())
 
-            await self.q.join()
-
-            for _ in range(self.concurrency):
-                self.q.put_nowait((None, 0))
+            await self.shutdown()
 
         logger.info("all tasks finished!")
+
+    async def shutdown(self) -> None:
+        await self.q.join()
+
+        for _ in range(self.concurrency):
+            self.q.put_nowait((None, 0))
 
     async def worker(self) -> None:
         while True:
