@@ -170,7 +170,7 @@ class ApiTokenScanner:
     async def run(self, urls: Sequence[str]) -> None:
         self.q = Queue()
 
-        for x in urls:
+        for x in urls[::-1]:
             self.q.put_nowait((x, self.depth))
 
         logger.debug(f"queue size: {self.q.qsize()}")
