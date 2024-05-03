@@ -308,22 +308,21 @@ class ApiTokenScanner:
 
         links = self.extract_links(content)
 
-        sp = uparse.urlsplit(base_url)
+        base_netloc = uparse.urlsplit(base_url).netloc
 
         for link in links:
             url = uparse.urljoin(base_url, link)
-
-            if sp.netloc != uparse.urlsplit(url).netloc:
-                continue
-
             url, _ = uparse.urldefrag(url)
 
             if url in self.seen:
                 continue
 
-            url_without_query = url.split("?")[0]
+            sp = uparse.urlsplit(url)
 
-            if url_without_query.lower().endswith(EXCLUDE_EXTS):
+            if base_netloc != sp.netloc:
+                continue
+
+            if sp.path.lower().endswith(EXCLUDE_EXTS):
                 continue
 
             if self.counter[sp.netloc] + 1 > self.urls_per_host:
