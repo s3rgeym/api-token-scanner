@@ -134,25 +134,21 @@ class ApiTokenScanner:
     output: TextIO = sys.stdout
     _: dataclasses.KW_ONLY
     depth: int = 1
-    concurrency: int = 10
+    concurrency: int = 50
     timeout: float = 5.0
     urls_per_host: int = 100
 
     @asynccontextmanager
     async def get_client_session(self) -> AsyncIterator[aiohttp.ClientSession]:
         conn = aiohttp.TCPConnector(
-            limit=0,
+            limit=self.concurrency,
             ssl=False,
             ttl_dns_cache=300,
             use_dns_cache=True,
             keepalive_timeout=60,
         )
-        tmt = aiohttp.ClientTimeout(
-            total=None,
-            sock_connect=self.timeout,
-            sock_read=self.timeout,
-        )
-        async with aiohttp.ClientSession(connector=conn, timeout=tmt) as client:
+        # tmt = aiohttp.ClientTimeout(self.timeout)
+        async with aiohttp.ClientSession(connector=conn) as client:
             client.headers.update(
                 {
                     "User-Agent": USER_AGENT,
@@ -161,11 +157,11 @@ class ApiTokenScanner:
             )
             yield client
 
-    async def shutdown(self) -> None:
-        await self.q.join()
+    # async def shutdown(self) -> None:
+    #     await self.q.join()
 
-        for t in self.workers:
-            t.cancel()
+    #     for _ in range(self.concurrency):
+    #         self.q.put_nowait((None, 0))
 
     async def run(self, urls: Sequence[str]) -> None:
         self.q = Queue()
@@ -176,11 +172,14 @@ class ApiTokenScanner:
         self.seen = set()
         self.counter = collections.Counter()
 
-        async with self.get_client_session() as self.session, asyncio.TaskGroup() as tg:
-            self.workers = [
-                tg.create_task(self.worker()) for _ in range(self.concurrency)
-            ]
-            tg.create_task(self.shutdown())
+        async with asyncio.TaskGroup() as tg, self.get_client_session() as self.session:
+            for _ in range(self.concurrency):
+                tg.create_task(self.worker())
+
+            await self.q.join()
+
+            for _ in range(self.concurrency):
+                self.q.put_nowait((None, 0))
 
         logger.info("all tasks finished!")
 
@@ -188,22 +187,25 @@ class ApiTokenScanner:
         while True:
             try:
                 logger.debug(f"queue size: {self.q.qsize()}")
+
                 url, depth = await self.q.get()
 
-                if url in self.seen:
-                    logger.debug(f"already seen: {url}")
-                    continue
+                try:
+                    if url is None:
+                        logger.info("task finished!")
+                        break
 
-                await self.handle_url(url, depth)
+                    if url in self.seen:
+                        logger.debug(f"already seen: {url}")
+                        continue
+
+                    await self.handle_url(url, depth)
+                finally:
+                    self.q.task_done()
             # fix ERROR:asyncio:Task exception was never retrieved
             except (asyncio.CancelledError, KeyboardInterrupt):
                 logger.warning("task canceled!")
                 break
-            except Exception as ex:
-                logger.error(f"unexpected error: {ex}")
-            finally:
-                with suppress(ValueError):
-                    self.q.task_done()
 
     async def handle_url(
         self,
@@ -212,7 +214,7 @@ class ApiTokenScanner:
     ) -> None:
         logger.debug(f"start handle: {url} ({depth=})")
         try:
-            async with self.session.get(url) as response:
+            async with asyncio.timeout(self.timeout), self.session.get(url) as response:
                 self.seen.add(url)
                 self.seen.add(str(response.url))
                 response.raise_for_status()
@@ -265,6 +267,8 @@ class ApiTokenScanner:
                     self.output.flush()
         except (aiohttp.ClientError, asyncio.TimeoutError):
             logger.warning(f"connection error: {url}")
+        except Exception as ex:
+            logger.exception(ex)
         else:
             logger.debug(f"successfully handle: {url}")
 
@@ -408,21 +412,21 @@ def _parse_args(
         "--urls-per-host",
         help="urls per host",
         type=int,
-        default=150,
+        default=100,
     )
     parser.add_argument(
         "-c",
         "--concurrency",
         help="number of concurrent workers",
         type=int,
-        default=30,
+        default=50,
     )
     parser.add_argument(
         "-t",
         "--timeout",
         help="client timeout",
         type=float,
-        default=5.0,
+        default=10.0,
     )
     parser.add_argument(
         "-v",
