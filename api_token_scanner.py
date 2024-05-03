@@ -141,17 +141,17 @@ class ApiTokenScanner:
     @asynccontextmanager
     async def get_client_session(self) -> AsyncIterator[aiohttp.ClientSession]:
         resolver = aiohttp.AsyncResolver(nameservers=["8.8.8.8", "8.8.4.4"])
-        conn = aiohttp.TCPConnector(
-            limit=self.concurrency,
+        connector = aiohttp.TCPConnector(
             ssl=False,
             ttl_dns_cache=300,
             use_dns_cache=True,
             keepalive_timeout=60,
             resolver=resolver,
         )
-        # tmt = aiohttp.ClientTimeout(self.timeout)
+        timeout = aiohttp.ClientTimeout(self.timeout)
         async with aiohttp.ClientSession(
-            connector=conn,
+            timeout=timeout,
+            connector=connector,
             # тормозят куки?
             cookie_jar=aiohttp.DummyCookieJar(),
         ) as client:
@@ -172,9 +172,9 @@ class ApiTokenScanner:
         self.seen = set()
         self.counter = collections.Counter()
 
-        async with asyncio.TaskGroup() as tg, self.get_client_session() as self.session:
+        async with asyncio.TaskGroup() as g:
             for _ in range(self.concurrency):
-                tg.create_task(self.worker())
+                g.create_task(self.worker())
 
             await self.shutdown()
 
@@ -187,37 +187,39 @@ class ApiTokenScanner:
             self.q.put_nowait((None, 0))
 
     async def worker(self) -> None:
-        while True:
-            try:
-                logger.debug(f"queue size: {self.q.qsize()}")
-
-                url, depth = await self.q.get()
-
+        async with self.get_client_session() as session:
+            while True:
                 try:
-                    if url is None:
-                        logger.info("task finished!")
-                        break
+                    logger.debug(f"queue size: {self.q.qsize()}")
 
-                    if url in self.seen:
-                        logger.debug(f"already seen: {url}")
-                        continue
+                    url, depth = await self.q.get()
 
-                    await self.handle_url(url, depth)
-                finally:
-                    self.q.task_done()
-            # fix ERROR:asyncio:Task exception was never retrieved
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                logger.warning("task canceled!")
-                break
+                    try:
+                        if url is None:
+                            logger.info("task finished!")
+                            break
 
-    async def handle_url(
+                        if url in self.seen:
+                            logger.debug(f"already seen: {url}")
+                            continue
+
+                        await self.session(session, url, depth)
+                    finally:
+                        self.q.task_done()
+                # fix ERROR:asyncio:Task exception was never retrieved
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    logger.warning("task canceled!")
+                    break
+
+    async def session(
         self,
+        session: aiohttp.ClientSession,
         url: str,
         depth: int,
     ) -> None:
         logger.debug(f"start handle: {url} ({depth=})")
         try:
-            async with asyncio.timeout(self.timeout), self.session.get(url) as response:
+            async with session.get(url) as response:
                 self.seen.add(url)
                 self.seen.add(str(response.url))
                 response.raise_for_status()
